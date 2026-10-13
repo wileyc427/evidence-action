@@ -1,0 +1,89 @@
+name: Agentic Evidence
+description: Record proof that a pull request works (its demos played in a real browser in the project's Docker Compose environment, recorded), upload it, and report it on the PR.
+author: wileyc427
+branding:
+  icon: video
+  color: green
+inputs:
+  server:
+    description: >-
+      The evidence server, e.g. https://evidence.example.com. Without it, the run stays in the job
+      (see the run-dir output). With it and no key, the run is uploaded with this job's OIDC token:
+      the workflow needs `permissions: id-token: write`, and the repository must be linked (the
+      server's GitHub App installed on it).
+    required: false
+  key-id:
+    description: An upload key id, for a server without the GitHub App (or a repository that isn't linked).
+    required: false
+  key-secret:
+    description: The upload key's secret (keep it in a secret).
+    required: false
+  github-token:
+    description: For the check run and the PR comment (needs checks write and pull-requests write).
+    default: ${{ github.token }}
+  url:
+    description: >-
+      Run the demos against the app already running at this URL (a preview deployment) instead of
+      bringing up the project's Compose environment: nothing is built, started or reset. The
+      report says the run didn't start the app from the commit.
+    required: false
+  check-name:
+    description: The check run's name (and its PR comment's), so several evidence jobs can report on one PR.
+    default: Evidence
+  demos:
+    description: Only these demos (names or files), one per line.
+    required: false
+  working-directory:
+    description: The repository's folder.
+    required: false
+  video:
+    description: Record video (installs Playwright's ffmpeg).
+    default: 'true'
+  check-run:
+    description: Post an "Evidence" check run on the commit.
+    default: 'true'
+  comment:
+    description: Comment on the pull request (one comment, updated on each run).
+    default: 'true'
+  fail-on:
+    description: failed (default), incomplete (fail unless passed), or never.
+    default: failed
+outputs:
+  verdict:
+    description: passed, failed or incomplete.
+    value: ${{ steps.evidence.outputs.verdict }}
+  run-id:
+    description: The run's id.
+    value: ${{ steps.evidence.outputs.run-id }}
+  run-dir:
+    description: The run's folder (manifest, report, recordings).
+    value: ${{ steps.evidence.outputs.run-dir }}
+  report-url:
+    description: The uploaded report.
+    value: ${{ steps.evidence.outputs.report-url }}
+runs:
+  using: composite
+  steps:
+    - name: Install the browser driver
+      shell: bash
+      # Next to the bundle (dist/node_modules), away from the action folder's package.json.
+      run: npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$GITHUB_ACTION_PATH/dist" playwright-core@1.64.0
+    - name: Record evidence
+      id: evidence
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/dist/index.mjs"
+      env:
+        INPUT_SERVER: ${{ inputs.server }}
+        INPUT_KEY-ID: ${{ inputs.key-id }}
+        INPUT_KEY-SECRET: ${{ inputs.key-secret }}
+        INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_CHECK-NAME: ${{ inputs.check-name }}
+        INPUT_DEMOS: ${{ inputs.demos }}
+        INPUT_WORKING-DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_VIDEO: ${{ inputs.video }}
+        INPUT_CHECK-RUN: ${{ inputs.check-run }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+        INPUT_FAIL-ON: ${{ inputs.fail-on }}
+        # The CI machine is disposable, and Ubuntu's AppArmor rules can block Chromium's sandbox.
+        EVIDENCE_NO_BROWSER_SANDBOX: '1'
