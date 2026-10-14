@@ -7657,6 +7657,250 @@ async function checkPage(inspector, serviceLogs, options) {
   };
 }
 
+// ../packages/runner/dist/coverage.js
+var DEFAULT_UI_PATTERNS = [
+  "**/*.{tsx,jsx,vue,svelte,astro,html,htm,css,scss,sass,less}",
+  "**/*.component.ts",
+  "**/*.{cshtml,razor,erb,hbs,ejs,njk,liquid}"
+];
+var EXCLUDED = ["**/*.{test,spec}.*", "**/__tests__/**", "**/e2e/**", ".evidence/**", "**/node_modules/**"];
+function demoCoverage(changes, options) {
+  if (!changes)
+    return null;
+  const prefix = options.project ? `${options.project.replace(/\/+$/, "")}/` : "";
+  const demos = `${options.demos.replace(/^\.\//, "").replace(/\/+$/, "")}/`;
+  const ui = (options.ui ?? DEFAULT_UI_PATTERNS).map(globToRegExp);
+  const excluded = EXCLUDED.map(globToRegExp);
+  const uiFiles = [];
+  const demosChanged = [];
+  for (const file of changes.files) {
+    if (prefix && !file.path.startsWith(prefix))
+      continue;
+    const path = file.path.slice(prefix.length);
+    if (path.startsWith(demos)) {
+      if (file.status !== "deleted")
+        demosChanged.push(file.path);
+      continue;
+    }
+    if (ui.some((p) => p.test(path)) && !excluded.some((p) => p.test(path)))
+      uiFiles.push(file.path);
+  }
+  return { uiFiles, demosChanged, uncovered: uiFiles.length > 0 && demosChanged.length === 0 };
+}
+function globToRegExp(glob) {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        i++;
+        if (glob[i + 1] === "/") {
+          i++;
+          out += "(?:.*/)?";
+        } else
+          out += ".*";
+      } else
+        out += "[^/]*";
+    } else if (c === "?")
+      out += "[^/]";
+    else if (c === "{") {
+      const end = glob.indexOf("}", i);
+      if (end < 0)
+        out += "\\{";
+      else {
+        out += `(?:${glob.slice(i + 1, end).split(",").map((part) => part.replace(/[.+^$()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")).join("|")})`;
+        i = end;
+      }
+    } else
+      out += c.replace(/[.+^$()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${out}$`);
+}
+
+// ../packages/runner/dist/report.js
+var esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+var rel = (path) => `./${path.split("/").map(encodeURIComponent).join("/")}`;
+var when = (iso) => `${iso.slice(0, 19).replace("T", " ")} UTC`;
+function reportHtml(m) {
+  const pill = (state, text) => `<span class="pill ${state}">${esc(text)}</span>`;
+  const passedDemos = m.demos.filter((d) => d.ok).length;
+  const verdictText = { passed: "Passed", failed: "Failed", incomplete: "Incomplete" }[m.verdict];
+  const demos = m.demos.map((d) => {
+    const steps = d.steps.map((s) => {
+      const mark = s.ok === true ? "\u2713" : s.ok === false ? "\u2717" : "\xB7";
+      const notes = [
+        s.error,
+        ...s.pageErrors.map((e) => `Uncaught: ${e}`),
+        ...s.consoleErrors.map((e) => `Console: ${e}`),
+        ...s.failedRequests.map((e) => `Request: ${e}`)
+      ].filter(Boolean);
+      return `<tr class="${s.ok === false ? "failed" : s.ok === null ? "skipped" : ""}">
+  <td class="mark">${mark}</td>
+  <td><div class="title">${esc(s.index)}. ${esc(s.title)}</div>${s.title !== s.action ? `<div class="action">${esc(s.action)}</div>` : ""}${notes.length ? `<pre class="notes">${esc(notes.join("\n"))}</pre>` : ""}${s.transcript ? `<pre class="transcript">${esc(s.transcript)}</pre>${s.detail && s.transcript.includes("\u2026 (the rest is in") ? `<a class="action" href="${rel(s.detail)}">Full transcript</a>` : ""}` : ""}</td>
+  <td class="ms">${s.ok === null ? "not run" : `${esc(s.ms)} ms`}</td>
+  <td class="thumb">${s.screenshot ? `<a href="${rel(s.screenshot)}"><img loading="lazy" src="${rel(s.screenshot)}" alt="After step ${esc(s.index)}"></a>` : ""}</td>
+</tr>`;
+    }).join("\n");
+    return `<section class="demo" id="demo-${esc(d.id)}">
+  <h3>${pill(d.ok ? "ok" : "bad", d.ok ? "passed" : "failed")} ${esc(d.name)}</h3>
+  <p class="meta">${d.file ? `${esc(d.file)} \xB7 ` : ""}${(d.durationMs / 1e3).toFixed(1)} s \xB7 ${d.steps.filter((s) => s.ok).length}/${d.steps.length} steps</p>
+  ${d.video ? `<video controls preload="metadata" src="${rel(d.video)}"></video>` : d.videoError ? `<p class="meta">No recording: ${esc(d.videoError)}</p>` : `<p class="meta">Requests and commands, no browser: each step's transcript is below.</p>`}
+  <table class="steps">${steps}</table>
+</section>`;
+  }).join("\n");
+  const checks = m.checks.map((c) => {
+    const d = c.details;
+    const notes = [
+      ...d.loadError ? [`Didn't load: ${d.loadError}`] : [],
+      ...(d.pageErrors ?? []).map((e) => `Uncaught: ${e}`),
+      ...(d.consoleErrors ?? []).map((e) => `Console: ${e}`),
+      ...(d.failedRequests ?? []).map((e) => `Request: ${e}`),
+      ...Object.entries(d.serviceErrors ?? {}).flatMap(([name, errors]) => errors.map((e) => `${name}: ${e}`))
+    ];
+    return `<section class="check">
+  <p>${pill(c.ok ? "ok" : "bad", c.ok ? "passed" : "problems")} <b>${esc(c.path)}</b> ${esc(c.summary)}</p>
+  ${notes.length ? `<pre class="notes">${esc(notes.join("\n"))}</pre>` : ""}
+  ${c.screenshot ? `<img class="shot" loading="lazy" src="${rel(c.screenshot)}" alt="${esc(c.path)}">` : ""}
+</section>`;
+  }).join("\n");
+  const changes = m.changes;
+  const logs = m.artifacts.filter((a) => a.kind === "log");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence: ${esc(m.repository.owner)}/${esc(m.repository.name)} @ ${esc(m.commit.sha.slice(0, 7))}</title>
+<style>
+:root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --surface:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --border:#30363d; --surface:#161b22; --ok:#3fb950; --bad:#f85149; --warn:#d29922; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 32px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); } h3 { font-size: 15px; margin: 0 0 4px; }
+.meta { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
+code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); vertical-align: 1px; }
+.pill.ok { color: var(--ok); border-color: currentColor; } .pill.bad { color: var(--bad); border-color: currentColor; } .pill.warn { color: var(--warn); border-color: currentColor; }
+.summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+ul.problems { margin: 8px 0; padding-left: 20px; color: var(--bad); }
+table { border-collapse: collapse; width: 100%; }
+.files td { padding: 3px 8px; border-bottom: 1px solid var(--border); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.files .n { text-align: right; width: 60px; } .add { color: var(--ok); } .del { color: var(--bad); }
+pre { margin: 6px 0; padding: 10px; background: var(--surface); border-radius: 6px; overflow-x: auto; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.demo, .check { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; }
+video { width: 100%; max-height: 560px; background: #000; border-radius: 6px; margin: 6px 0 10px; }
+.steps td { padding: 6px; border-top: 1px solid var(--border); vertical-align: top; }
+.steps .mark { width: 22px; font-weight: 700; } .steps .ms { width: 80px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.steps .thumb { width: 168px; } .steps img { width: 160px; border: 1px solid var(--border); border-radius: 4px; display: block; }
+.steps .failed .title, .steps .failed .mark { color: var(--bad); font-weight: 600; } .steps .skipped { color: var(--muted); }
+.action { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; } .notes { color: var(--bad); }
+.transcript { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--code-bg, rgba(127,127,127,.1)); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+.shot { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; font-size: 13px; } dt { color: var(--muted); } dd { margin: 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>${esc(m.repository.owner)}/${esc(m.repository.name)}</h1>
+<p class="meta">${m.draft ? "<b>Draft</b> (uncommitted changes) on " : ""}commit <code>${esc(m.commit.sha.slice(0, 12))}</code>${m.ref ? ` on <b>${esc(m.ref.replace(/^refs\/heads\//, ""))}</b>` : ""}${m.pullRequest ? ` \xB7 pull request #${esc(m.pullRequest)}` : ""} \xB7 ${esc(when(m.startedAt))}</p>
+<p>${esc(m.commit.message.split("\n")[0])}</p>
+<div class="summary">
+  ${pill(m.verdict === "passed" ? "ok" : m.verdict === "failed" ? "bad" : "warn", verdictText)}
+  ${pill(m.demos.length && passedDemos === m.demos.length ? "ok" : m.demos.length ? "bad" : "", `Demos ${passedDemos}/${m.demos.length}`)}
+  ${m.checks.length ? pill(m.checks.every((c) => c.ok) ? "ok" : "bad", m.checks.every((c) => c.ok) ? "Checks passed" : "Check problems") : ""}
+  ${changes ? pill("", `${changes.files.length} file${changes.files.length === 1 ? "" : "s"} changed`) : ""}
+  ${m.coverage?.uncovered ? pill("warn", "Demos don't cover this change") : ""}
+</div>
+${m.coverage?.uncovered ? `<p class="meta"><b>Demos don't cover this change.</b> ${esc(m.coverage.uiFiles.length)} UI file${m.coverage.uiFiles.length === 1 ? "" : "s"} changed and no demo was added or edited, so the demos may not exercise what changed (see Changes). This doesn't change the verdict.</p>` : ""}
+${m.app && !m.app.started ? `<p class="meta">${appCommitText(m.app, "html")}</p>` : ""}
+${m.problems.length ? `<ul class="problems">${m.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+
+<h2>Demos</h2>
+${demos || '<p class="meta">No demos ran.</p>'}
+
+<h2>Checks</h2>
+${checks || '<p class="meta">No checks ran.</p>'}
+
+${changes ? `<h2>Changes</h2>
+<p class="meta">Against ${esc(changes.base)}</p>
+<table class="files">${changes.files.map((f) => `<tr><td>${esc(f.status)}</td><td>${esc(f.path)}${m.coverage?.uncovered && m.coverage.uiFiles.includes(f.path) ? ' <span class="pill warn">UI, no demo</span>' : ""}</td><td class="n add">+${esc(f.additions)}</td><td class="n del">\u2212${esc(f.deletions)}</td></tr>`).join("")}</table>` : ""}
+
+<h2>Run</h2>
+<dl>
+  <dt>Run</dt><dd><code>${esc(m.runId)}</code></dd>
+  <dt>Commit</dt><dd><code>${esc(m.commit.sha)}</code> (tree <code>${esc(m.commit.tree.slice(0, 12))}</code>) by ${esc(m.commit.author)}</dd>
+  ${m.dirty ? `<dt>Uncommitted</dt><dd>${esc(m.dirty.files)} files, diff <code>${esc(m.dirty.diffSha256.slice(0, 12))}</code></dd>` : ""}
+  <dt>Trigger</dt><dd>${esc(m.trigger)}</dd>
+  ${m.environment?.kind === "compose" ? `<dt>Environment</dt><dd><code>${esc(m.environment.file)}</code>, service <code>${esc(m.environment.service)}</code>${m.runner.compose ? ` (Docker Compose ${esc(m.runner.compose)})` : ""}</dd>` : ""}
+  ${m.app && !m.app.started ? `<dt>App</dt><dd>Already running at <code>${esc(m.app.url)}</code></dd>` : ""}
+  <dt>Runner</dt><dd>${esc(m.runner.version)} on ${esc(m.runner.os)}${m.runner.browser ? `, ${esc(m.runner.browser)}` : ""}</dd>
+  <dt>Took</dt><dd>${((Date.parse(m.finishedAt) - Date.parse(m.startedAt)) / 1e3).toFixed(1)} s</dd>
+  ${logs.length ? `<dt>Logs</dt><dd>${logs.map((l) => `<a href="${rel(l.path)}">${esc(l.path)}</a>`).join(" \xB7 ")}</dd>` : ""}
+</dl>
+</main>
+</body>
+</html>
+`;
+}
+var VERIFIED_BY = {
+  "github-deployment": "GitHub's successful deployment of this commit",
+  header: "its commit header",
+  endpoint: "its version endpoint"
+};
+function appCommitText(app, format) {
+  const text = (t) => format === "html" ? esc(t) : t;
+  const at = format === "html" ? `<code>${esc(app.url)}</code>` : `\`${app.url}\``;
+  if (app.commitVerified)
+    return `The demos ran against the app already running at ${at}, confirmed to serve this commit by ${VERIFIED_BY[app.commitVerified]}.`;
+  if (app.commitNote)
+    return `The demos ran against the app already running at ${at}. This run didn't start it from the commit. ${text(app.commitNote)}`;
+  return `The demos ran against the app already running at ${at}. This run didn't start it from the commit, so nothing here shows that it serves exactly this code.`;
+}
+
+// ../packages/runner/dist/app-commit.js
+function shas(text) {
+  return [...text.matchAll(/\b[0-9a-f]{7,40}\b/gi)].map((m) => m[0].toLowerCase());
+}
+async function confirmAppCommit(appUrl, sha, check, options = {}) {
+  if (check.verifiedBy)
+    return { verified: check.verifiedBy };
+  if (!check.header && !check.endpoint)
+    return { unknown: check.note ?? "nothing was set up to confirm it" };
+  const fetchFn = options.fetchFn ?? fetch;
+  const how = check.header ? `its ${check.header} header` : `${check.endpoint}`;
+  const target = check.header ? appUrl : new URL(check.endpoint, appUrl).toString();
+  const deadline = Date.now() + (check.timeoutMs ?? 10 * 6e4);
+  const interval = check.intervalMs ?? 1e4;
+  const want = sha.toLowerCase();
+  let seen;
+  let problem = "";
+  for (let attempt = 0; ; attempt++) {
+    if (options.signal?.aborted)
+      return { unknown: "stopped" };
+    try {
+      const response = await fetchFn(target, { redirect: "follow", signal: AbortSignal.timeout(15e3), headers: { "cache-control": "no-cache" } });
+      const text = check.header ? response.headers.get(check.header) ?? "" : (await response.text()).slice(0, 1e5);
+      const found = shas(text);
+      if (found.some((s) => want.startsWith(s)))
+        return { verified: check.header ? "header" : "endpoint" };
+      if (found.length) {
+        seen = found[0];
+        problem = "";
+      } else
+        problem = check.header ? `${target} has no ${check.header} header with a commit` : `${target} shows no commit`;
+    } catch (error) {
+      problem = `${target}: ${error.message}`;
+    }
+    if (Date.now() + interval > deadline)
+      break;
+    if (attempt === 0)
+      options.log?.(`app: waiting for ${appUrl} to serve ${want.slice(0, 7)} (${how}${seen ? ` shows ${seen.slice(0, 7)}` : ""})`);
+    await new Promise((done) => setTimeout(done, interval));
+  }
+  return seen && !problem ? { mismatch: seen, how } : { unknown: problem || `${how} never showed the commit` };
+}
+
 // ../packages/runner/dist/config.js
 var import_yaml = __toESM(require_dist(), 1);
 import { readFile } from "node:fs/promises";
@@ -7684,6 +7928,7 @@ async function loadConfig(checkout2, project = "", options = {}) {
     expose: file.expose ?? {},
     reset: file.reset === "restart" ? "restart" : null,
     demos: file.demos ?? ".evidence/demos",
+    ...file.coverage?.ui ? { ui: file.coverage.ui } : {},
     fromFile: text !== void 0
   };
 }
@@ -7697,7 +7942,7 @@ function validateConfig(raw) {
   if (retired.length || c["version"] === 1) {
     throw new Error(`${CONFIG_FILE} uses the old format (${retired.length ? retired.join(", ") : "version 1"}). The environment is now a Docker Compose file: move how the app is built and started into ${DEFAULT_COMPOSE_FILE}, then set version: 2, compose and app.service. "evidence init" writes an example.`);
   }
-  const allowed = /* @__PURE__ */ new Set(["version", "compose", "app", "expose", "reset", "demos"]);
+  const allowed = /* @__PURE__ */ new Set(["version", "compose", "app", "expose", "reset", "demos", "coverage"]);
   for (const key of Object.keys(c))
     if (!allowed.has(key))
       problems.push(`unknown setting "${key}"`);
@@ -7739,6 +7984,19 @@ function validateConfig(raw) {
         problems.push("app.path must start with /");
       if (app["start_timeout"] !== void 0 && (!Number.isInteger(app["start_timeout"]) || app["start_timeout"] < 1))
         problems.push("app.start_timeout must be a number of seconds");
+    }
+  }
+  if (c["coverage"] !== void 0) {
+    const coverage = c["coverage"];
+    if (!coverage || typeof coverage !== "object" || Array.isArray(coverage))
+      problems.push("coverage must be a mapping");
+    else {
+      for (const key of Object.keys(coverage))
+        if (key !== "ui")
+          problems.push(`coverage: unknown setting "${key}"`);
+      const ui = coverage["ui"];
+      if (ui !== void 0 && (!Array.isArray(ui) || ui.some((p) => typeof p !== "string" || !p.trim())))
+        problems.push("coverage.ui must be a list of file patterns");
     }
   }
   if (problems.length)
@@ -8872,131 +9130,6 @@ function kindFor(path) {
   return "other";
 }
 
-// ../packages/runner/dist/report.js
-var esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-var rel = (path) => `./${path.split("/").map(encodeURIComponent).join("/")}`;
-var when = (iso) => `${iso.slice(0, 19).replace("T", " ")} UTC`;
-function reportHtml(m) {
-  const pill = (state, text) => `<span class="pill ${state}">${esc(text)}</span>`;
-  const passedDemos = m.demos.filter((d) => d.ok).length;
-  const verdictText = { passed: "Passed", failed: "Failed", incomplete: "Incomplete" }[m.verdict];
-  const demos = m.demos.map((d) => {
-    const steps = d.steps.map((s) => {
-      const mark = s.ok === true ? "\u2713" : s.ok === false ? "\u2717" : "\xB7";
-      const notes = [
-        s.error,
-        ...s.pageErrors.map((e) => `Uncaught: ${e}`),
-        ...s.consoleErrors.map((e) => `Console: ${e}`),
-        ...s.failedRequests.map((e) => `Request: ${e}`)
-      ].filter(Boolean);
-      return `<tr class="${s.ok === false ? "failed" : s.ok === null ? "skipped" : ""}">
-  <td class="mark">${mark}</td>
-  <td><div class="title">${esc(s.index)}. ${esc(s.title)}</div>${s.title !== s.action ? `<div class="action">${esc(s.action)}</div>` : ""}${notes.length ? `<pre class="notes">${esc(notes.join("\n"))}</pre>` : ""}${s.transcript ? `<pre class="transcript">${esc(s.transcript)}</pre>${s.detail && s.transcript.includes("\u2026 (the rest is in") ? `<a class="action" href="${rel(s.detail)}">Full transcript</a>` : ""}` : ""}</td>
-  <td class="ms">${s.ok === null ? "not run" : `${esc(s.ms)} ms`}</td>
-  <td class="thumb">${s.screenshot ? `<a href="${rel(s.screenshot)}"><img loading="lazy" src="${rel(s.screenshot)}" alt="After step ${esc(s.index)}"></a>` : ""}</td>
-</tr>`;
-    }).join("\n");
-    return `<section class="demo" id="demo-${esc(d.id)}">
-  <h3>${pill(d.ok ? "ok" : "bad", d.ok ? "passed" : "failed")} ${esc(d.name)}</h3>
-  <p class="meta">${d.file ? `${esc(d.file)} \xB7 ` : ""}${(d.durationMs / 1e3).toFixed(1)} s \xB7 ${d.steps.filter((s) => s.ok).length}/${d.steps.length} steps</p>
-  ${d.video ? `<video controls preload="metadata" src="${rel(d.video)}"></video>` : d.videoError ? `<p class="meta">No recording: ${esc(d.videoError)}</p>` : `<p class="meta">Requests and commands, no browser: each step's transcript is below.</p>`}
-  <table class="steps">${steps}</table>
-</section>`;
-  }).join("\n");
-  const checks = m.checks.map((c) => {
-    const d = c.details;
-    const notes = [
-      ...d.loadError ? [`Didn't load: ${d.loadError}`] : [],
-      ...(d.pageErrors ?? []).map((e) => `Uncaught: ${e}`),
-      ...(d.consoleErrors ?? []).map((e) => `Console: ${e}`),
-      ...(d.failedRequests ?? []).map((e) => `Request: ${e}`),
-      ...Object.entries(d.serviceErrors ?? {}).flatMap(([name, errors]) => errors.map((e) => `${name}: ${e}`))
-    ];
-    return `<section class="check">
-  <p>${pill(c.ok ? "ok" : "bad", c.ok ? "passed" : "problems")} <b>${esc(c.path)}</b> ${esc(c.summary)}</p>
-  ${notes.length ? `<pre class="notes">${esc(notes.join("\n"))}</pre>` : ""}
-  ${c.screenshot ? `<img class="shot" loading="lazy" src="${rel(c.screenshot)}" alt="${esc(c.path)}">` : ""}
-</section>`;
-  }).join("\n");
-  const changes = m.changes;
-  const logs = m.artifacts.filter((a) => a.kind === "log");
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Evidence: ${esc(m.repository.owner)}/${esc(m.repository.name)} @ ${esc(m.commit.sha.slice(0, 7))}</title>
-<style>
-:root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --surface:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; color-scheme: light; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --border:#30363d; --surface:#161b22; --ok:#3fb950; --bad:#f85149; --warn:#d29922; color-scheme: dark; } }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
-h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 32px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); } h3 { font-size: 15px; margin: 0 0 4px; }
-.meta { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
-code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); vertical-align: 1px; }
-.pill.ok { color: var(--ok); border-color: currentColor; } .pill.bad { color: var(--bad); border-color: currentColor; } .pill.warn { color: var(--warn); border-color: currentColor; }
-.summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
-ul.problems { margin: 8px 0; padding-left: 20px; color: var(--bad); }
-table { border-collapse: collapse; width: 100%; }
-.files td { padding: 3px 8px; border-bottom: 1px solid var(--border); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.files .n { text-align: right; width: 60px; } .add { color: var(--ok); } .del { color: var(--bad); }
-pre { margin: 6px 0; padding: 10px; background: var(--surface); border-radius: 6px; overflow-x: auto; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
-.demo, .check { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; }
-video { width: 100%; max-height: 560px; background: #000; border-radius: 6px; margin: 6px 0 10px; }
-.steps td { padding: 6px; border-top: 1px solid var(--border); vertical-align: top; }
-.steps .mark { width: 22px; font-weight: 700; } .steps .ms { width: 80px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.steps .thumb { width: 168px; } .steps img { width: 160px; border: 1px solid var(--border); border-radius: 4px; display: block; }
-.steps .failed .title, .steps .failed .mark { color: var(--bad); font-weight: 600; } .steps .skipped { color: var(--muted); }
-.action { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; } .notes { color: var(--bad); }
-.transcript { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--code-bg, rgba(127,127,127,.1)); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
-.shot { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; font-size: 13px; } dt { color: var(--muted); } dd { margin: 0; }
-</style>
-</head>
-<body>
-<main>
-<h1>${esc(m.repository.owner)}/${esc(m.repository.name)}</h1>
-<p class="meta">${m.draft ? "<b>Draft</b> (uncommitted changes) on " : ""}commit <code>${esc(m.commit.sha.slice(0, 12))}</code>${m.ref ? ` on <b>${esc(m.ref.replace(/^refs\/heads\//, ""))}</b>` : ""}${m.pullRequest ? ` \xB7 pull request #${esc(m.pullRequest)}` : ""} \xB7 ${esc(when(m.startedAt))}</p>
-<p>${esc(m.commit.message.split("\n")[0])}</p>
-<div class="summary">
-  ${pill(m.verdict === "passed" ? "ok" : m.verdict === "failed" ? "bad" : "warn", verdictText)}
-  ${pill(m.demos.length && passedDemos === m.demos.length ? "ok" : m.demos.length ? "bad" : "", `Demos ${passedDemos}/${m.demos.length}`)}
-  ${m.checks.length ? pill(m.checks.every((c) => c.ok) ? "ok" : "bad", m.checks.every((c) => c.ok) ? "Checks passed" : "Check problems") : ""}
-  ${changes ? pill("", `${changes.files.length} file${changes.files.length === 1 ? "" : "s"} changed`) : ""}
-</div>
-${m.app && !m.app.started ? `<p class="meta">The demos ran against the app already running at <code>${esc(m.app.url)}</code>. This run didn't start it from the commit, so nothing here shows that it serves exactly this code.</p>` : ""}
-${m.problems.length ? `<ul class="problems">${m.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
-
-<h2>Demos</h2>
-${demos || '<p class="meta">No demos ran.</p>'}
-
-<h2>Checks</h2>
-${checks || '<p class="meta">No checks ran.</p>'}
-
-${changes ? `<h2>Changes</h2>
-<p class="meta">Against ${esc(changes.base)}</p>
-<table class="files">${changes.files.map((f) => `<tr><td>${esc(f.status)}</td><td>${esc(f.path)}</td><td class="n add">+${esc(f.additions)}</td><td class="n del">\u2212${esc(f.deletions)}</td></tr>`).join("")}</table>` : ""}
-
-<h2>Run</h2>
-<dl>
-  <dt>Run</dt><dd><code>${esc(m.runId)}</code></dd>
-  <dt>Commit</dt><dd><code>${esc(m.commit.sha)}</code> (tree <code>${esc(m.commit.tree.slice(0, 12))}</code>) by ${esc(m.commit.author)}</dd>
-  ${m.dirty ? `<dt>Uncommitted</dt><dd>${esc(m.dirty.files)} files, diff <code>${esc(m.dirty.diffSha256.slice(0, 12))}</code></dd>` : ""}
-  <dt>Trigger</dt><dd>${esc(m.trigger)}</dd>
-  ${m.environment?.kind === "compose" ? `<dt>Environment</dt><dd><code>${esc(m.environment.file)}</code>, service <code>${esc(m.environment.service)}</code>${m.runner.compose ? ` (Docker Compose ${esc(m.runner.compose)})` : ""}</dd>` : ""}
-  ${m.app && !m.app.started ? `<dt>App</dt><dd>Already running at <code>${esc(m.app.url)}</code></dd>` : ""}
-  <dt>Runner</dt><dd>${esc(m.runner.version)} on ${esc(m.runner.os)}${m.runner.browser ? `, ${esc(m.runner.browser)}` : ""}</dd>
-  <dt>Took</dt><dd>${((Date.parse(m.finishedAt) - Date.parse(m.startedAt)) / 1e3).toFixed(1)} s</dd>
-  ${logs.length ? `<dt>Logs</dt><dd>${logs.map((l) => `<a href="${rel(l.path)}">${esc(l.path)}</a>`).join(" \xB7 ")}</dd>` : ""}
-</dl>
-</main>
-</body>
-</html>
-`;
-}
-
 // ../packages/runner/dist/run.js
 import { mkdir as mkdir3, readFile as readFile2, readdir, realpath, rm as rm4, stat as stat3, writeFile as writeFile4 } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
@@ -9095,7 +9228,7 @@ async function changedFiles(root, base, sha) {
 }
 
 // ../packages/runner/dist/version.js
-var RUNNER_VERSION = "0.1.0";
+var RUNNER_VERSION = typeof __EVIDENCE_VERSION__ === "string" && __EVIDENCE_VERSION__ ? __EVIDENCE_VERSION__ : "0.1.0";
 
 // ../packages/runner/dist/run.js
 async function evidenceRun(options) {
@@ -9124,6 +9257,8 @@ async function evidenceRun(options) {
   let composeVersion;
   let started = false;
   let code;
+  let commitVerified = null;
+  let commitNote;
   try {
     code = await checkout(source, { workingTree: draft });
     config = await loadConfig(code, project, { requireEnvironment: !appUrl });
@@ -9134,6 +9269,18 @@ async function evidenceRun(options) {
     if (appUrl) {
       log(`app: already running at ${appUrl}`);
       await expectRunning(appUrl);
+      if (options.appCommit) {
+        const result = await confirmAppCommit(appUrl, source.commit.sha, options.appCommit, { log, ...options.signal ? { signal: options.signal } : {} });
+        if ("verified" in result) {
+          commitVerified = result.verified;
+          log(`app: serves ${source.commit.sha.slice(0, 7)} (${result.verified})`);
+        } else if ("mismatch" in result) {
+          throw new StepError("start", `The app at ${appUrl} serves commit ${result.mismatch.slice(0, 7)}, not ${source.commit.sha.slice(0, 7)} (${result.how}); no demos were run.`);
+        } else {
+          commitNote = `Couldn't confirm that it serves this commit: ${result.unknown}.`;
+          log(`app: ${commitNote}`);
+        }
+      }
     } else {
       const available = await composeAvailable();
       if (available.available)
@@ -9246,6 +9393,9 @@ async function evidenceRun(options) {
       });
   }
   const changes = options.base ? await changedFiles(source.root, options.base, source.commit.sha).then((files) => ({ base: options.base, files })).catch(() => null) : null;
+  const coverage = config ? demoCoverage(changes, { project, demos: config.demos, ...config.ui ? { ui: config.ui } : {} }) : null;
+  if (coverage?.uncovered)
+    log(`coverage: ${coverage.uiFiles.length} UI file${coverage.uiFiles.length === 1 ? "" : "s"} changed and no demo was added or edited`);
   const noDemos = demos.length === 0;
   const verdict = incomplete || noDemos ? "incomplete" : problems.length ? "failed" : "passed";
   const manifest = {
@@ -9264,7 +9414,10 @@ async function evidenceRun(options) {
       ...inspector.browserVersion ? { browser: inspector.browserVersion } : {},
       ...composeVersion ? { compose: composeVersion } : {}
     },
-    ...appUrl ? { environment: { kind: "url", url: appUrl }, app: { url: appUrl, started: false } } : config ? { environment: { kind: "compose", file: posix.join(project || ".", config.compose), service: config.app.service } } : {},
+    ...appUrl ? {
+      environment: { kind: "url", url: appUrl },
+      app: { url: appUrl, started: false, commitVerified, ...commitNote ? { commitNote } : {} }
+    } : config ? { environment: { kind: "compose", file: posix.join(project || ".", config.compose), service: config.app.service } } : {},
     ...started && environment ? { app: { url: environment.url, started: true } } : {},
     startedAt: startedAt.toISOString(),
     finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -9273,6 +9426,7 @@ async function evidenceRun(options) {
     demos,
     checks,
     changes,
+    coverage,
     artifacts: []
   };
   await writeFile4(join6(dir, REPORT_FILE), reportHtml({ ...manifest, artifacts: await listArtifacts(dir) }));
@@ -9375,6 +9529,11 @@ async function uploadRun(options) {
   return { runId: manifest.runId, reportUrl: result.reportUrl ?? "", skipped };
 }
 
+// ../packages/runner/dist/update.js
+var RELEASES_REPOSITORY = "wileyc427/evidence-action";
+var LATEST_PACKAGE_URL = `https://github.com/${RELEASES_REPOSITORY}/releases/latest/download/agentic-evidence.tgz`;
+var INSTALL_COMMAND = `npm install --global ${LATEST_PACKAGE_URL}`;
+
 // src/oidc.ts
 async function actionsToken(audience, env = process.env, fetchFn = fetch) {
   const url = env["ACTIONS_ID_TOKEN_REQUEST_URL"];
@@ -9415,7 +9574,7 @@ function summaryMarkdown(m, options = {}) {
     "",
     `${passed}/${m.demos.length} demo${m.demos.length === 1 ? "" : "s"} passed on \`${m.commit.sha.slice(0, 7)}\`${options.reportUrl ? ` \xB7 ${link("Report", options.reportUrl)}` : ""}${options.runUrl ? ` \xB7 ${link("Workflow run", options.runUrl)}` : ""}`,
     "",
-    ...m.app && !m.app.started ? [`The app was already running at \`${m.app.url}\`; this run didn't start it from the commit.`, ""] : []
+    ...m.app && !m.app.started ? [appCommitText(m.app, "markdown"), ""] : []
   ];
   if (m.demos.length) {
     lines.push("| | Demo | Steps | Recording |", "|---|---|---|---|");
@@ -9426,6 +9585,15 @@ function summaryMarkdown(m, options = {}) {
       lines.push(`| ${d.ok ? "\u2705" : "\u274C"} | ${escapeCell(d.name)} | ${steps} | ${video} |`);
     }
     lines.push("");
+  }
+  if (m.coverage?.uncovered) {
+    const shown = m.coverage.uiFiles.slice(0, 10).map((f) => `\`${f}\``);
+    const more = m.coverage.uiFiles.length - shown.length;
+    lines.push(
+      `> [!WARNING]`,
+      `> **Demos don't cover this change.** ${m.coverage.uiFiles.length} UI file${m.coverage.uiFiles.length === 1 ? "" : "s"} changed (${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}) and no demo was added or edited, so passing demos may not exercise it. This doesn't change the verdict.`,
+      ""
+    );
   }
   const failures = m.demos.flatMap(
     (d) => d.steps.filter((s) => s.ok === false && s.error).map((s) => `- **${escapeCell(d.name)}**, step ${s.index}: ${s.error}`)
@@ -9492,6 +9660,52 @@ ${markdown}`;
   await gh(ctx, "POST", `/repos/${ctx.owner}/${ctx.repo}/issues/${pullRequest}/comments`, { body }, fetchFn);
   return "created";
 }
+async function waitForDeployment(ctx, sha, options = {}) {
+  const deadline = Date.now() + (options.timeoutMs ?? 10 * 6e4);
+  const interval = options.intervalMs ?? 15e3;
+  const environment = options.environment ? `&environment=${encodeURIComponent(options.environment)}` : "";
+  const which = `${sha.slice(0, 7)}${options.environment ? ` to ${options.environment}` : ""}`;
+  for (let attempt = 0; ; attempt++) {
+    let failed = 0;
+    let total = 0;
+    try {
+      const deployments = await gh(
+        ctx,
+        "GET",
+        `/repos/${ctx.owner}/${ctx.repo}/deployments?sha=${sha}${environment}&per_page=20`,
+        void 0,
+        options.fetchFn
+      );
+      total = deployments.length;
+      for (const deployment of deployments) {
+        const statuses = await gh(
+          ctx,
+          "GET",
+          `/repos/${ctx.owner}/${ctx.repo}/deployments/${deployment.id}/statuses?per_page=5`,
+          void 0,
+          options.fetchFn
+        );
+        const latest = statuses[0];
+        if (latest?.state === "success") {
+          const url = latest.environment_url || latest.target_url;
+          if (url) return { url, environment: deployment.environment };
+        }
+        if (latest && ["failure", "error"].includes(latest.state)) failed++;
+      }
+    } catch (error) {
+      if (attempt === 0 && /HTTP 403|HTTP 404/.test(error.message))
+        return { reason: `GitHub's deployments couldn't be read (the workflow needs permissions: deployments: read): ${error.message}` };
+    }
+    if (total > 0 && failed === total) return { reason: `every deployment of ${which} failed` };
+    if (Date.now() + interval > deadline) {
+      return {
+        reason: total ? `no deployment of ${which} succeeded within ${Math.round((options.timeoutMs ?? 6e5) / 6e4)} minutes` : `nothing deployed ${which} within ${Math.round((options.timeoutMs ?? 6e5) / 6e4)} minutes`
+      };
+    }
+    if (attempt === 0) options.log?.(`Waiting for a successful deployment of ${which}\u2026`);
+    await new Promise((done) => setTimeout(done, interval));
+  }
+}
 
 // src/main.ts
 var input = (name) => process.env[`INPUT_${name.toUpperCase().replace(/ /g, "_")}`]?.trim() ?? "";
@@ -9532,12 +9746,41 @@ async function main() {
       console.log("::warning::Couldn't install ffmpeg for video; demos will have screenshots only.");
     }
   }
+  let url = input("url");
+  let appCommit;
+  const timeoutMs = (Number(input("commit-timeout")) || 10) * 6e4;
+  const sha = commit ?? git2(workspace, "rev-parse", "HEAD") ?? process.env["GITHUB_SHA"] ?? "";
+  const deployment = input("wait-for-deployment");
+  if (deployment && deployment !== "false") {
+    const token2 = input("github-token");
+    const found = token2 && owner && repo && sha ? await waitForDeployment({ api: process.env["GITHUB_API_URL"] ?? "https://api.github.com", token: token2, owner, repo }, sha, {
+      ...deployment !== "true" ? { environment: deployment } : {},
+      timeoutMs,
+      log: (line) => console.log(line)
+    }) : { reason: "no GitHub token or commit to look its deployments up with" };
+    if ("url" in found) {
+      console.log(`Deployment of ${sha.slice(0, 7)} to ${found.environment}: ${found.url}`);
+      url ||= found.url;
+      if (url === found.url) appCommit = { verifiedBy: "github-deployment" };
+    } else {
+      console.log(`::warning::Couldn't confirm a deployment of this commit: ${found.reason}.`);
+      appCommit = { note: `Couldn't confirm a deployment of it: ${found.reason}.` };
+      if (!url) {
+        console.log(`::error::No app to record against: no successful deployment of ${sha.slice(0, 7)}, and no url input.`);
+        return 1;
+      }
+    }
+  }
+  const header = input("commit-header");
+  const endpoint = input("commit-endpoint");
+  if (url && !appCommit?.verifiedBy && (header || endpoint)) appCommit = { ...appCommit, ...header ? { header } : { endpoint }, timeoutMs };
   const demos = input("demos").split(/[\n,]/).map((d) => d.trim()).filter(Boolean);
   console.log("::group::Recording evidence");
   const { manifest, dir } = await evidenceRun({
     repo: workspace,
     ...commit ? { commit } : {},
-    ...input("url") ? { url: input("url") } : {},
+    ...url ? { url } : {},
+    ...url && appCommit ? { appCommit } : {},
     trigger: "ci",
     pullRequest: pr?.number ?? null,
     ref: pr ? `refs/heads/${pr.head.ref}` : process.env["GITHUB_REF"] ?? null,

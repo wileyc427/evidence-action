@@ -27,6 +27,26 @@ inputs:
       bringing up the project's Compose environment: nothing is built, started or reset. The
       report says the run didn't start the app from the commit.
     required: false
+  wait-for-deployment:
+    description: >-
+      Wait for a successful GitHub deployment of the commit (as Vercel, Netlify or Render report
+      them) and record against its URL: true for any environment, or an environment's name
+      (e.g. Preview). The report says the app was confirmed to serve the commit. Needs
+      `permissions: deployments: read`.
+    required: false
+  commit-header:
+    description: >-
+      With url: a response header of the app that holds the commit SHA (e.g. x-commit-sha). The run
+      waits until the app at the URL serves this commit, and stops if it serves another.
+    required: false
+  commit-endpoint:
+    description: >-
+      With url: a path on the app (or a URL) whose response holds the commit SHA (e.g. /version).
+      Used like commit-header.
+    required: false
+  commit-timeout:
+    description: Minutes to wait for the deployment, or for the app to serve the commit.
+    default: '10'
   check-name:
     description: The check run's name (and its PR comment's), so several evidence jobs can report on one PR.
     default: Evidence
@@ -78,6 +98,10 @@ runs:
         INPUT_KEY-SECRET: ${{ inputs.key-secret }}
         INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
         INPUT_URL: ${{ inputs.url }}
+        INPUT_WAIT-FOR-DEPLOYMENT: ${{ inputs.wait-for-deployment }}
+        INPUT_COMMIT-HEADER: ${{ inputs.commit-header }}
+        INPUT_COMMIT-ENDPOINT: ${{ inputs.commit-endpoint }}
+        INPUT_COMMIT-TIMEOUT: ${{ inputs.commit-timeout }}
         INPUT_CHECK-NAME: ${{ inputs.check-name }}
         INPUT_DEMOS: ${{ inputs.demos }}
         INPUT_WORKING-DIRECTORY: ${{ inputs.working-directory }}
